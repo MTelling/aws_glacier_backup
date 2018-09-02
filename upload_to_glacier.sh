@@ -3,9 +3,9 @@
 # Original file is glacierupload.sh
 
 # Test that parameters exist
-if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
+if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ] || [ -z "$5" ]; then
 	echo; echo;
-	echo "Syntax: $0 [ Source File Name ] [ Archive Description ] [ Vault Name ]"
+	echo "Syntax: $0 [ Source File Name ] [ Archive Description ] [ Vault Name ] [ Info File Name ] [ S3 Bucket Name ]"
 	echo; echo;
  	exit 1
 fi
@@ -13,7 +13,9 @@ fi
 # get the arguments
 fileName=$1
 archiveDescription=$2
-vaultName = $3
+vaultName=$3
+infoFileName=$4
+S3BucketName=$5
 
 # manipulate vaultname and bytesize here
 chunkMb=32
@@ -70,7 +72,9 @@ for f in $files
 parallel --load 100% -a $commandFile --no-notice --bar --jobs 20 --eta
 
 # Complete the multipart download
-aws glacier complete-multipart-upload --archive-size $archiveSize --checksum $archiveCheckSum --upload-id $uploadId --account-id - --vault-name $vaultName
+result=$(aws glacier complete-multipart-upload --archive-size $archiveSize --checksum $archiveCheckSum --upload-id $uploadId --account-id - --vault-name $vaultName)
+echo $result >> $infoFileName
+aws s3 cp $infoFileName s3://$S3BucketName
 
 # Clean up
 rm -rf $partsFolder
