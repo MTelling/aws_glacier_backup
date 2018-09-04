@@ -101,35 +101,116 @@ def upload_part(archive, archive_size, part_offset, part_size_bytes,
 	
 	byte_range = 'bytes {}-{}/{}'.format(
     	part_offset, part_offset + len(part) - 1, archive_size)
-    part_number = byte_pos // part_size
-    percentage = part_num / part_number
+	part_number = part_offset // part_size_bytes
+	percentage = part_number / parts_count
 
-    click.echo("Uploading part {0} of {1}. {2}%".format(
-    	part_number, parts_count, percentage))
+	click.echo("Uploading part {0} of {1}. {2}%".format(
+		part_number, parts_count, percentage))
 
 
-    for i in range(MAX_RETRIES):
-   	    checksum = get_treehash_for_data(part)
-   	    try:
-	    	response = glacier.upload_multipart_part(
-	            vaultName=vault_name, uploadId=upload_id,
-	            range=byte_range, body=part, checksum=checksum)
-		   	file.close()
-		   	return
-    	except Exception, e:
-    		click.secho("Upload error for part {0}. Retry no. {1}".format(
-    			part_number, i), fg='red')
-    		pass
+	for i in range(MAX_RETRIES):
+		checksum = get_treehash_for_data(part)
+		try:
+			response = glacier_client.upload_multipart_part(
+			vaultName=vault_name, uploadId=upload_id,
+			range=byte_range, body=part, checksum=checksum)
+			file.close()
+			return
+		except Exception, e:
+			click.echo()
+			click.echo(e)
+			click.echo()
+			click.secho("Upload error for part {0}. Retry no. {1}".format(
+			part_number, i), fg='red')
+			continue
 
+
+	click.echo()
+	click.secho("!! ERROR !!", fg='red')
+	click.secho("Part {0} of {1} failed to upload after {2} retries.".format(
+		part_number, parts_count, MAX_RETRIES), fg='red')
+	click.secho("Upload Id: {0}".format(upload_id), fg='red')
+	click.secho("Upload needs to be manually aborted or retried.")
+	click.secho("!!!!!!")
+	exit(1)
+
+def initiate_multipart_upload(glacier_client, vault_name, description, part_size_bytes):
+	try:
+		response = glacier_client.initiate_multipart_upload(
+			vaultName=vault_name,
+			archiveDescription=description,
+			partSize=str(part_size_bytes)
+		)
+	except Exception, e:
+		click.echo("")
+		click.echo(e)
+		click.echo("")
+		click.secho("Could not initiate multipart upload! Exiting!\n", fg='red')
+		exit(1)
+
+	return response['uploadId']
+
+def abort_multipart_upload(glacier_client, vault_name, upload_id):
+	try:
+		response = glacier_client.abort_multipart_upload(
+			vaultName=vault_name,
+			uploadId=upload_id,
+		)
+	except Exception, e:
+		click.echo("")
+		click.echo(e)
+		click.echo("")
+		click.secho("Upload ID: {0}".format(upload_id), fg='red')
+		click.secho("Could not abort multipart upload! Please abort manually!\n", fg='red')
+		exit(1)
+
+def complete_multipart_upload(glacier_client, vault_name, archive_size, 
+	                          checksum, upload_id):
+	try:
+		response = glacier_client.complete_multipart_upload(
+			vaultName=vault_name,
+			uploadId=upload_id,
+			archiveSize=str(archive_size),
+			checksum=checksum
+		)
+	except Exception, e:
+		click.echo("")
+		click.echo(e)
+		click.echo("")
+		click.secho("Upload ID: {0}".format(upload_id), fg='red')
+		click.secho("Could not complete multipart upload! Aborting upload!\n", fg='red')
+		abort_multipart_upload(glacier_client, vault_name, upload_id)
+		exit(1)
 
 
 def upload_multipart_archive_to_glacier(archive, archive_size, part_size_bytes, 
-		                                description, glacier_client, vault_name):
+		                                description, glacier_client, vault_name,
+		                                checksum):
 	click.echo("Archive will be uploaded as multi-part upload to glacier.")
-	click.secho("Upload started!", fg='green')
 	response = err = None
 	part_offsets = [offset for offset in range(0, archive_size, part_size_bytes)]
-	click.echo(part_offsets)
+
+	upload_id = initiate_multipart_upload(
+		glacier_client, vault_name, description, part_size_bytes)
+	click.echo()
+	click.echo("Initiated upload.\nUpload Id: {0}".format(upload_id))
+
+	for part_offset in part_offsets:
+		# Remove try/catch. We should not abort. 
+		try:
+			upload_part(archive, archive_size, part_offset, part_size_bytes, 
+		                len(part_offsets), glacier_client, vault_name, upload_id)
+		except Exception, e:
+			abort_multipart_upload(glacier_client, vault_name, upload_id)
+			raise e
+	
+	complete_multipart_upload(
+		glacier_client, vault_name, 
+		archive_size, checksum, 
+		upload_id)
+
+	click.secho("Upload to glacier completed!", fg='green')
+
 	return response, err
 
 def create_info_file(archive, archive_size, description, event, glacier_response):
@@ -163,17 +244,17 @@ def upload_file_to_s3(file, bucket):
 def upload_archive(archive, archive_size, part_size_bytes, description,
 	               event, glacier_client, vault_name, bucket):
 	click.echo()
-	treehash = get_treehash(archive)
-	click.echo("Tree hash of file: {0}".format(treehash))
+	checksum = get_treehash(archive)
+	click.echo("Tree hash of file: {0}".format(checksum))
 
 	response = err = None
 	if part_size_bytes >= archive_size:
 		response, err = upload_single_archive_to_glacier(
-			archive, description, glacier_client, vault_name, treehash)
+			archive, description, glacier_client, vault_name, checksum)
 	else:
 		response, err = upload_multipart_archive_to_glacier(
 			archive, archive_size, part_size_bytes, 
-			description, glacier_client, vault_name)
+			description, glacier_client, vault_name, checksum)
 
 	if err:
 		click.secho("Upload aborted!", fg='red')
